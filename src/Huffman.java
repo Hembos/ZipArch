@@ -2,8 +2,8 @@ public class Huffman {
     protected final int MASK = 0b11111111;
     protected final String bitOne = "1";
     protected final String bitZero = "0";
-    protected final byte BYTE_SIZE = 8;
-    protected final short CODING_TABLE_SIZE = 255;
+    protected static final byte BYTE_SIZE = 8;
+    protected static final short CODING_TABLE_SIZE = 255;
     protected Tree huffmanTree;
     protected String[] codingArray;
     protected String treeText;

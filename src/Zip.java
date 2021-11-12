@@ -1,6 +1,4 @@
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
+import java.io.*;
 import java.util.Collections;
 
 public class Zip {
@@ -28,6 +26,8 @@ public class Zip {
     private Action action;
     private int bufferSize;
     private final byte BYTE_SIZE = 8;
+    private final int MIN_BUFFER_SIZE = 100;
+    private final int MAX_BUFFER_SIZE = 1000000;
 
     Zip(Config config) {
         this.config = config;
@@ -47,7 +47,7 @@ public class Zip {
 
         try {
             bufferSize = Integer.parseInt(config.getArg(Config.Configuration.BUFFER_SIZE));
-            if (bufferSize < 0) {
+            if (bufferSize < MIN_BUFFER_SIZE || bufferSize > MAX_BUFFER_SIZE) {
                 return Error.NOT_CORRECT_BUFFER_SIZE;
             }
         } catch (NumberFormatException exception) {
@@ -58,86 +58,54 @@ public class Zip {
     }
 
     private Error compress() {
-        Compress compress = new Compress();
-
         try (FileInputStream fileInputStream = new FileInputStream(inputFile)) {
-            int available = fileInputStream.available();
-            int readSize = Math.min(available, bufferSize);
-            while (available > 0) {
-                byte[] bytes = new byte[readSize];
-
-                if (fileInputStream.read(bytes) == -1) {
-                    return Error.READ_ERROR;
-                }
-
-                compress.fillFrequencyTable(bytes);
-
-                available -= readSize;
-                readSize = Math.min(available, bufferSize);
-            }
-
-        } catch (IOException ex) {
-            return Error.COULD_NOT_OPEN_FILE;
-        }
-
-        compress.createHuffmanTree();
-        compress.createCodingTable();
-
-        System.out.println("Code table created\n" +
-                "Compress started");
-        try {
-            FileInputStream fileInputStream = new FileInputStream(inputFile);
             FileOutputStream fileOutputStream = new FileOutputStream(outputFile);
 
-            String tree = compress.getTreeText();
-            String treeSize = String.format("%16s", Integer.toBinaryString(tree.length())).replace(" ", "0");
-            StringBuilder res = new StringBuilder(treeSize + tree);
-
             int available = fileInputStream.available();
-            int completePercent = available;
-            int readSize = Math.min(available, bufferSize);
+            int a = available;
 
             while (available > 0) {
-                if (res.length() >= readSize * BYTE_SIZE) {
-                    String tmp = res.substring(0, BYTE_SIZE * readSize);
-                    res = new StringBuilder(res.substring(BYTE_SIZE * readSize));
+                System.out.println((100 - (float) available / a * 100) + "%");
 
-                    byte[] compressedBytes = new byte[readSize];
-                    for (int i = 0; i < readSize; i++) {
-                        compressedBytes[i] = (byte) Integer.parseInt(tmp.substring(i * BYTE_SIZE, (i + 1) * BYTE_SIZE), 2);
-                    }
-                    fileOutputStream.write(compressedBytes);
-                }
+                int curBlockSize = Math.min(bufferSize, available);
+                byte[] bytes = new byte[curBlockSize];
+                fileInputStream.read(bytes);
 
-                byte[] bytes = new byte[readSize];
-                if (fileInputStream.read(bytes) == -1) {
-                    return Error.READ_ERROR;
-                }
+                Compress compress = new Compress();
+
+                compress.fillFrequencyTable(bytes);
+                compress.createHuffmanTree();
+                compress.createCodingTable();
+
+                String tree = compress.getTreeText();
+                String treeSize = String.format("%16s", Integer.toBinaryString(tree.length())).replace(" ", "0");
+                StringBuilder res = new StringBuilder(treeSize + tree);
 
                 for (byte b : bytes) {
                     res.append(compress.getCompressedByte(b));
                 }
 
-                available -= readSize;
-                if (available == 0)
-                    break;
-                readSize = Math.min(available, bufferSize);
+                byte countZeroInEnd = 0;
+                if (res.length() % BYTE_SIZE != 0)
+                    countZeroInEnd = (byte) (BYTE_SIZE - res.length() % BYTE_SIZE);
+
+                res = new StringBuilder(String.format("%8s", Integer.toBinaryString(countZeroInEnd & compress.MASK)).replace(" ", "0") + res);
+
+                res.append(String.join("", Collections.nCopies(countZeroInEnd, "0")));
+
+                int countCompressedBytes = res.length() / BYTE_SIZE;
+                res = new StringBuilder(String.format("%32s", Integer.toBinaryString(countCompressedBytes)).replace(" ", "0") + res);
+                byte[] compressedBytes = new byte[countCompressedBytes + 4];
+
+                for (int i = 0; i < countCompressedBytes + 4; i++) {
+                    compressedBytes[i] = (byte) Integer.parseInt(res.substring(i * BYTE_SIZE, (i + 1) * BYTE_SIZE), 2);
+                }
+
+                fileOutputStream.write(compressedBytes);
+
+                available -= bufferSize;
             }
 
-            int counter = 0;
-            if (res.length() % BYTE_SIZE != 0)
-                counter = BYTE_SIZE - res.length() % BYTE_SIZE;
-            res.append(String.join("", Collections.nCopies(counter, "0")));
-            res.append(String.format("%8s", Integer.toBinaryString(counter & compress.MASK)).replace(" ", "0"));
-
-            byte[] compressedBytes = new byte[res.length() / BYTE_SIZE];
-            for (int i = 0; i < res.length() / BYTE_SIZE; i++) {
-                compressedBytes[i] = (byte) Integer.parseInt(res.substring(i * BYTE_SIZE, (i + 1) * BYTE_SIZE), 2);
-            }
-            fileOutputStream.write(compressedBytes);
-
-            fileInputStream.close();
-            fileOutputStream.close();
         } catch (IOException exception) {
             return Error.COULD_NOT_OPEN_FILE;
         }
@@ -145,92 +113,72 @@ public class Zip {
         return null;
     }
 
+    //Количество сжатых байт (4 байта) + /*Количество исходных байт*/ + количество добавленных в конец нулей + размер дерева + дерево + сжатые данные + нули
     private Error decompress() {
-        try {
-            FileInputStream fileInputStream = new FileInputStream(inputFile);
+        try (FileInputStream fileInputStream = new FileInputStream(inputFile)) {
             FileOutputStream fileOutputStream = new FileOutputStream(outputFile);
 
-            byte[] byteTreeSize = new byte[2];
-            if (fileInputStream.read(byteTreeSize) == -1) {
-                return Error.READ_ERROR;
-            }
-
-            String treeSizeText = String.format("%8s", Integer.toBinaryString(byteTreeSize[0] & 0xff)).replace(" ", "0")
-                    + String.format("%8s", Integer.toBinaryString(byteTreeSize[1] & 0xff)).replace(" ", "0");
-
-            int treeSize = Integer.parseInt(treeSizeText, 2);
-
-            StringBuilder res = new StringBuilder();
-
-            byte[] treeBytes = new byte[treeSize / BYTE_SIZE + 1];
-            if (fileInputStream.read(treeBytes) == -1) {
-                return Error.READ_ERROR;
-            }
-
-            for (byte b : treeBytes) {
-                res.append(String.format("%8s", Integer.toBinaryString(b & 0xff)).replace(" ", "0"));
-            }
-
-            String treeText = res.substring(0, treeSize);
-            res = new StringBuilder(res.substring(treeSize));
-            Decompress decompress = new Decompress(treeText);
-            decompress.createHuffmanTree();
-            decompress.createCodingTable();
-            decompress.fillHufTable();
-
             int available = fileInputStream.available();
-            int completePercent = available;
-            int readSize = Math.min(available, bufferSize);
-            while (available > 0) {
-                byte[] bytes = new byte[readSize];
-                if (fileInputStream.read(bytes) == -1) {
-                    return Error.READ_ERROR;
+            int a = available;
+
+            while (available != 0) {
+                System.out.println((100 - (float) available / a * 100) + "%");
+                int blockSize = 0;
+                for (int i = 0; i < 4; i++) {
+                    byte curByte = (byte) fileInputStream.read();
+
+                    blockSize = blockSize | ((0xFF & curByte) << Decompress.BYTE_SIZE * (3 - i));
+                }
+                if (blockSize < 0) {
+                    return Error.DECOMPRESS_ERROR;
                 }
 
-                for (byte b : bytes) {
-                    res.append(String.format("%8s", Integer.toBinaryString(b & 0xff)).replace(" ", "0"));
+                byte[] block = new byte[blockSize];
+                fileInputStream.read(block);
+
+                byte countZeroInEnd = block[0];
+
+                short treeSize = (short) (((0xFF & block[1]) << Decompress.BYTE_SIZE) | (0xFF & block[2]));
+
+                StringBuilder blockInTextBits = new StringBuilder("");
+                for (int i = 3; i < blockSize; i++) {
+                    blockInTextBits.append(String.format("%8s", Integer.toBinaryString(block[i] & 0xff)).replace(" ", "0"));
                 }
 
-                available -= readSize;
-                if (res.length() >= bufferSize * BYTE_SIZE || available <= 0) {
-                    String character = "";
-                    byte[] tmp = new byte[res.length()];
-                    int tmpIndex = 0;
-                    while (res.length() != 0 && res.length() > BYTE_SIZE * 2) {
-                        character += res.charAt(0);
-                        String decChar = decompress.getChar(character);
-                        if (decChar != null) {
-                            tmp[tmpIndex] = (byte) Integer.parseInt(decChar, 2);
-                            tmpIndex++;
-                            character = "";
-                        }
-                        res = new StringBuilder(res.substring(1));
+                String treeText = blockInTextBits.substring(0, treeSize);
+                blockInTextBits = new StringBuilder(blockInTextBits.substring(treeSize));
+
+                Decompress decompress = new Decompress(treeText);
+                decompress.createHuffmanTree();
+                decompress.createCodingTable();
+                decompress.fillHufTable();
+
+                blockInTextBits.delete(blockInTextBits.length() - countZeroInEnd, blockInTextBits.length());
+
+                byte[] decompressedBlock = new byte[MAX_BUFFER_SIZE + treeSize];
+
+                int decBlockIndex = 0;
+                String character = "";
+                for (int i = 0; i < blockInTextBits.length(); i++) {
+                    character += blockInTextBits.charAt(i);
+                    String decChar = decompress.getChar(character);
+                    if (decChar != null) {
+                        decompressedBlock[decBlockIndex] = (byte) Integer.parseInt(decChar, 2);
+                        decBlockIndex++;
+                        character = "";
                     }
-
-                    fileOutputStream.write(tmp, 0, tmpIndex);
+                }
+                if (!character.equals("")) {
+                    return Error.DECOMPRESS_ERROR;
                 }
 
-                if (available <= 0)
-                    break;
-                readSize = Math.min(available, bufferSize);
+                fileOutputStream.write(decompressedBlock, 0, decBlockIndex);
+
+                available -= blockSize + 4;
             }
 
-            int countZero = Integer.parseInt(res.substring(BYTE_SIZE, BYTE_SIZE * 2), 2);
-            res = new StringBuilder(res.substring(0, res.length() - countZero - BYTE_SIZE));
-            String character = "";
-            while (res.length() != 0) {
-                character += res.charAt(0);
-                String decChar = decompress.getChar(character);
-                if (decChar != null) {
-                    fileOutputStream.write((byte) Integer.parseInt(decChar, 2));
-                    character = "";
-                }
-                res = new StringBuilder(res.substring(1));
-            }
 
-            fileInputStream.close();
-            fileOutputStream.close();
-        } catch (IOException exception) {
+        } catch (IOException e) {
             return Error.COULD_NOT_OPEN_FILE;
         }
 

@@ -1,4 +1,4 @@
-Action=
-InputFile=
-OutputFile=
-BufferSize=
+Action=decompression
+InputFile=output.txt
+OutputFile=text.txt
+BufferSize=100000
