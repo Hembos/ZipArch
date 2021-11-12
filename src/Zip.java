@@ -25,9 +25,6 @@ public class Zip {
     private String outputFile;
     private Action action;
     private int bufferSize;
-    private final byte BYTE_SIZE = 8;
-    private final int MIN_BUFFER_SIZE = 100;
-    private final int MAX_BUFFER_SIZE = 1000000;
 
     Zip(Config config) {
         this.config = config;
@@ -47,9 +44,6 @@ public class Zip {
 
         try {
             bufferSize = Integer.parseInt(config.getArg(Config.Configuration.BUFFER_SIZE));
-            if (bufferSize < MIN_BUFFER_SIZE || bufferSize > MAX_BUFFER_SIZE) {
-                return Error.NOT_CORRECT_BUFFER_SIZE;
-            }
         } catch (NumberFormatException exception) {
             return Error.NOT_CORRECT_BUFFER_SIZE;
         }
@@ -69,7 +63,8 @@ public class Zip {
 
                 int curBlockSize = Math.min(bufferSize, available);
                 byte[] bytes = new byte[curBlockSize];
-                fileInputStream.read(bytes);
+                if (fileInputStream.read(bytes) == -1)
+                    return Error.READ_ERROR;
 
                 Compress compress = new Compress();
 
@@ -86,19 +81,20 @@ public class Zip {
                 }
 
                 byte countZeroInEnd = 0;
-                if (res.length() % BYTE_SIZE != 0)
-                    countZeroInEnd = (byte) (BYTE_SIZE - res.length() % BYTE_SIZE);
+                if (res.length() % Compress.BYTE_SIZE != 0)
+                    countZeroInEnd = (byte) (Compress.BYTE_SIZE - res.length() % Compress.BYTE_SIZE);
 
                 res = new StringBuilder(String.format("%8s", Integer.toBinaryString(countZeroInEnd & compress.MASK)).replace(" ", "0") + res);
 
                 res.append(String.join("", Collections.nCopies(countZeroInEnd, "0")));
 
-                int countCompressedBytes = res.length() / BYTE_SIZE;
-                res = new StringBuilder(String.format("%32s", Integer.toBinaryString(countCompressedBytes)).replace(" ", "0") + res);
-                byte[] compressedBytes = new byte[countCompressedBytes + 4];
+                int countCompressedBytes = res.length() / Compress.BYTE_SIZE;
+                res = new StringBuilder(String.format("%32s", Integer.toBinaryString(countCompressedBytes)).replace(" ", "0") +
+                        String.format("%32s", Integer.toBinaryString(curBlockSize)).replace(" ", "0") + res);
+                byte[] compressedBytes = new byte[countCompressedBytes + Compress.BYTE_SIZE];
 
-                for (int i = 0; i < countCompressedBytes + 4; i++) {
-                    compressedBytes[i] = (byte) Integer.parseInt(res.substring(i * BYTE_SIZE, (i + 1) * BYTE_SIZE), 2);
+                for (int i = 0; i < countCompressedBytes + Compress.BYTE_SIZE; i++) {
+                    compressedBytes[i] = (byte) Integer.parseInt(res.substring(i * Compress.BYTE_SIZE, (i + 1) * Compress.BYTE_SIZE), 2);
                 }
 
                 fileOutputStream.write(compressedBytes);
@@ -113,7 +109,7 @@ public class Zip {
         return null;
     }
 
-    //Количество сжатых байт (4 байта) + /*Количество исходных байт*/ + количество добавленных в конец нулей + размер дерева + дерево + сжатые данные + нули
+    //Количество сжатых байт (4 байта) + Количество исходных байтов + количество добавленных в конец нулей + размер дерева + дерево + сжатые данные + нули
     private Error decompress() {
         try (FileInputStream fileInputStream = new FileInputStream(inputFile)) {
             FileOutputStream fileOutputStream = new FileOutputStream(outputFile);
@@ -133,14 +129,22 @@ public class Zip {
                     return Error.DECOMPRESS_ERROR;
                 }
 
+                int decompressedBlockSize = 0;
+                for (int i = 0; i < 4; i++) {
+                    byte curByte = (byte) fileInputStream.read();
+
+                    decompressedBlockSize = decompressedBlockSize | ((0xFF & curByte) << Decompress.BYTE_SIZE * (3 - i));
+                }
+
                 byte[] block = new byte[blockSize];
-                fileInputStream.read(block);
+                if (fileInputStream.read(block) == -1)
+                    return Error.READ_ERROR;
 
                 byte countZeroInEnd = block[0];
 
                 short treeSize = (short) (((0xFF & block[1]) << Decompress.BYTE_SIZE) | (0xFF & block[2]));
 
-                StringBuilder blockInTextBits = new StringBuilder("");
+                StringBuilder blockInTextBits = new StringBuilder();
                 for (int i = 3; i < blockSize; i++) {
                     blockInTextBits.append(String.format("%8s", Integer.toBinaryString(block[i] & 0xff)).replace(" ", "0"));
                 }
@@ -155,7 +159,7 @@ public class Zip {
 
                 blockInTextBits.delete(blockInTextBits.length() - countZeroInEnd, blockInTextBits.length());
 
-                byte[] decompressedBlock = new byte[MAX_BUFFER_SIZE + treeSize];
+                byte[] decompressedBlock = new byte[decompressedBlockSize];
 
                 int decBlockIndex = 0;
                 String character = "";
